@@ -1,0 +1,73 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_DEFAULT_REGION = 'your_aws_region'
+        AWS_ACCESS_KEY_ID = credentials('aws-access-key-id')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-access-key')
+        S3_BUCKET = 'your_s3_bucket_name'
+    }
+
+    stages {
+        stage('Install Packer') {
+            steps {
+                script {
+                    // Install Packer based on the agent's OS
+                    if (isUnix()) {
+                        sh "curl -o packer.zip https://releases.hashicorp.com/packer/1.7.4/packer_1.7.4_linux_amd64.zip && unzip packer.zip && chmod +x packer && mv packer /usr/local/bin/"
+                    } else {
+                        bat "curl -o packer.zip https://releases.hashicorp.com/packer/1.7.4/packer_1.7.4_windows_amd64.zip && Expand-Archive -Path packer.zip -DestinationPath . && Move-Item -Path packer.exe -Destination C:\\Windows\\System32\\"
+                    }
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build AMI') {
+            steps {
+                script {
+                    def packerCommand = "packer build -var 'aws_access_key=${env.AWS_ACCESS_KEY_ID}' -var 'aws_secret_key=${env.AWS_SECRET_ACCESS_KEY}' -var 'region=${env.AWS_DEFAULT_REGION}' your_packer_template.hcl"
+                    def packerBuild = bat(returnStatus: true, script: packerCommand)
+
+                    if (packerBuild != 0) {
+                        error("Packer build failed with exit code ${packerBuild}")
+                    }
+                }
+            }
+        }
+
+        stage('Upload AMI to S3') {
+            steps {
+                script {
+                    def amiId = sh(script: "aws ec2 describe-images --filters 'Name=tag:Name,Values=your-ami-name' --query 'Images[0].ImageId' --output text", returnStdout: true).trim()
+
+                    def s3UploadCommand = "aws s3 cp $amiId s3://${env.S3_BUCKET}/"
+                    def uploadResult = sh(returnStatus: true, script: s3UploadCommand)
+
+                    if (uploadResult != 0) {
+                        error("S3 upload failed with exit code ${uploadResult}")
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            deleteDir()
+        }
+    }
+}
+
+def isUnix() {
+    return !isWindows()
+}
+
+def isWindows() {
+    return System.properties['os.name'].toLowerCase().contains('win')
+}
